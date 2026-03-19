@@ -4,10 +4,11 @@ import numpy as np
 import time
 import os
 from flask import Flask, request
+from threading import Thread
 
 # ================= CONFIG =================
 TOKEN = os.environ.get("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")      # Telegram bot token
-CHAT_ID = os.environ.get("6094849602")  # Telegram chat ID
+CHAT_ID = os.environ.get("6094849602")  # Your integer Telegram chat ID
 SYMBOL = os.environ.get("SYMBOL", "BTCUSDT")
 CONFIDENCE_THRESHOLD = 75
 
@@ -25,7 +26,8 @@ def home():
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        print("Telegram Response:", r.text)
     except Exception as e:
         print("Telegram Error:", e)
 
@@ -63,7 +65,7 @@ def generate_signal(hf, mf, lf):
     score = 0
     reasons = []
 
-    # High timeframe
+    # High timeframe (1h)
     latest = hf.iloc[-1]
     if latest["ema20"] > latest["ema50"]:
         score += 8; reasons.append("1h EMA Bull")
@@ -75,7 +77,7 @@ def generate_signal(hf, mf, lf):
         score += 3; reasons.append("1h MACD Bull")
     else: score -= 3; reasons.append("1h MACD Bear")
 
-    # Medium timeframe
+    # Medium timeframe (15m)
     latest = mf.iloc[-1]
     if latest["ema20"] > latest["ema50"]:
         score += 6; reasons.append("15m EMA Bull")
@@ -87,7 +89,7 @@ def generate_signal(hf, mf, lf):
         score += 3; reasons.append("15m MACD Bull")
     else: score -= 3; reasons.append("15m MACD Bear")
 
-    # Low timeframe
+    # Low timeframe (1m)
     latest = lf.iloc[-1]
     if latest["close"] > latest["ema20"]:
         score += 5; reasons.append("1m Price>EMA20")
@@ -122,24 +124,33 @@ def run_bot():
             send_telegram(f"⚠️ Error: {e}")
             time.sleep(60)
 
+def start_bot_thread():
+    global bot_running
+    if not bot_running:
+        t = Thread(target=run_bot)
+        t.start()
+        bot_running = True
+
 # ================= TELEGRAM WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    global bot_running
-    data = request.json
-    if "message" in data:
-        text = data["message"]["text"]
-        hf = calculate_indicators(get_data("1h",200))
-        mf = calculate_indicators(get_data("15m",200))
-        lf = calculate_indicators(get_data("1m",200))
-        sig, conf, reason = generate_signal(hf, mf, lf)
-        price = lf.iloc[-1]["close"]
-        if text=="1":
-            send_telegram(f"📊 SIGNAL: {sig if sig else 'No Signal'}\n💰 Price: {price}\n🔥 Confidence: {conf}%\n📌 Reasons: {', '.join(reason)}")
-        elif text.lower()=="start" and not bot_running:
-            bot_running = True
-            run_bot()
-    return {"ok": True}
+    try:
+        data = request.json
+        if "message" in data and "text" in data["message"]:
+            text = data["message"]["text"]
+            # Fetch data for single signal
+            hf = calculate_indicators(get_data("1h",200))
+            mf = calculate_indicators(get_data("15m",200))
+            lf = calculate_indicators(get_data("1m",200))
+            sig, conf, reasons = generate_signal(hf, mf, lf)
+            if text == "1":
+                send_telegram(f"📊 SIGNAL: {sig if sig else 'No Signal'}\n💰 Price: {lf.iloc[-1]['close']}\n🔥 Confidence: {conf}%\n📌 Reasons: {', '.join(reasons)}")
+            elif text.lower() == "start":
+                start_bot_thread()
+        return {"ok": True}
+    except Exception as e:
+        print("Webhook Error:", e)
+        return {"ok": False, "error": str(e)}
 
 # ================= START =================
 if __name__=="__main__":
