@@ -1,6 +1,6 @@
 ccxt
 pandas
 ta
-requests
 flask
-pytz‎
+requests
+pytz
