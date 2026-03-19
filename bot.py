@@ -6,6 +6,7 @@ import requests
 from flask import Flask, request
 import threading
 from datetime import datetime
+import pytz
 
 # ==============================
 # 🔑 TELEGRAM SETTINGS
@@ -153,7 +154,8 @@ def run_bot():
 
             buy, sell, price, sl, tp, confidence, accuracy = check_signals(df1m, df15m)
 
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ist = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(ist).strftime("%Y-%m-%d%I:%M:%S %p")
 
             # ==============================
             # 🔥 AUTO SIGNALS
