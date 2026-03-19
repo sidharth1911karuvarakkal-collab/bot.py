@@ -4,7 +4,16 @@ import numpy as np
 import time
 import os
 from threading import Thread
+from flask import Flask
 
+# ================= FLASK (FOR RENDER) =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running ✅"
+
+# ================= CONFIG =================
 TOKEN = os.environ.get("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")
 CHAT_ID = os.environ.get("6094849602")
 SYMBOL = "BTCUSDT"
@@ -58,14 +67,12 @@ def indicators(df):
     df["macd"] = ema12 - ema26
     df["signal"] = df["macd"].ewm(span=9).mean()
 
-    # RSI
     delta = df["close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # Bollinger
     df["bb_mid"] = df["close"].rolling(20).mean()
     df["bb_std"] = df["close"].rolling(20).std()
     df["bb_upper"] = df["bb_mid"] + 2 * df["bb_std"]
@@ -86,7 +93,6 @@ def ai_signal():
     m = mf.iloc[-1]
     l = lf.iloc[-1]
 
-    # Trend
     if h["ema20"] > h["ema50"]:
         score += 12; reasons.append("1h Bull")
     else:
@@ -97,7 +103,6 @@ def ai_signal():
     else:
         score -= 8; reasons.append("15m Bear")
 
-    # RSI
     if m["rsi"] < 30:
         score += 7; reasons.append("15m Oversold")
     elif m["rsi"] > 70:
@@ -108,13 +113,11 @@ def ai_signal():
     elif l["rsi"] > 70:
         score -= 6; reasons.append("1m Overbought")
 
-    # Bollinger
     if l["close"] < l["bb_lower"]:
         score += 10; reasons.append("BB Buy")
     elif l["close"] > l["bb_upper"]:
         score -= 10; reasons.append("BB Sell")
 
-    # MACD
     if l["macd"] > l["signal"]:
         score += 6; reasons.append("MACD Bull")
     else:
@@ -252,10 +255,9 @@ def command_bot():
 
 # ================= START =================
 if __name__ == "__main__":
-    send("🚀 BOT LIVE (POLLING MODE)")
-
     Thread(target=auto_bot).start()
     Thread(target=command_bot).start()
 
-    while True:
-        time.sleep(60)
+    # 🔥 THIS IS IMPORTANT (PORT BINDING)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
