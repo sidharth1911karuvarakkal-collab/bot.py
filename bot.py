@@ -3,7 +3,7 @@ import pandas as pd
 import ta
 import time
 import requests
-from flask import Flask, request
+from flask import Flask
 import threading
 from datetime import datetime
 import pytz
@@ -23,12 +23,15 @@ def send_telegram(msg):
         print("Telegram Error:", e)
 
 # ==============================
-# 📥 TELEGRAM POLLING (NO WEBHOOK)
+# 📥 TELEGRAM POLLING (NO SPAM)
 # ==============================
 last_update_id = None
+last_command_time = 0
+command_cooldown = 60   # seconds
 
 def check_telegram_commands():
-    global last_update_id
+    global last_update_id, last_command_time
+
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
     params = {"timeout": 5}
 
@@ -44,11 +47,19 @@ def check_telegram_commands():
             if "message" in update:
                 text = update["message"].get("text", "")
 
+                current_time = time.time()
+
+                # ⛔ prevent spam
+                if current_time - last_command_time < command_cooldown:
+                    return None
+
                 if text == "1":
+                    last_command_time = current_time
                     send_telegram("✅ Manual BUY Triggered")
                     return "BUY"
 
                 elif text == "2":
+                    last_command_time = current_time
                     send_telegram("🔴 Manual SELL Triggered")
                     return "SELL"
 
@@ -64,7 +75,7 @@ exchange = ccxt.okx()
 symbol = 'BTC/USDT'
 
 # ==============================
-# 📈 DATA (1m + 15m)
+# 📈 DATA FUNCTION
 # ==============================
 def get_data(timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
@@ -78,12 +89,11 @@ def get_data(timeframe):
     return df
 
 # ==============================
-# 🤖 STRATEGY (MULTI TIMEFRAME)
+# 🤖 STRATEGY
 # ==============================
 def check_signals(df1m, df15m):
     last1 = df1m.iloc[-1]
     prev1 = df1m.iloc[-2]
-
     last15 = df15m.iloc[-1]
 
     # ENTRY (1m)
@@ -99,7 +109,7 @@ def check_signals(df1m, df15m):
         last1['rsi'] < 50
     )
 
-    # TREND CONFIRMATION (15m)
+    # TREND (15m)
     trend_up = last15['close'] > last15['ma30']
     trend_down = last15['close'] < last15['ma30']
 
@@ -108,9 +118,7 @@ def check_signals(df1m, df15m):
 
     price = last1['close']
 
-    # ==============================
-    # 🎯 SL / TP CALCULATION
-    # ==============================
+    # SL / TP
     sl = price * 0.995
     tp = price * 1.01
 
@@ -118,9 +126,7 @@ def check_signals(df1m, df15m):
         sl = price * 1.005
         tp = price * 0.99
 
-    # ==============================
-    # 📊 CONFIDENCE + ACCURACY
-    # ==============================
+    # Confidence
     confidence = 50
 
     if last1['rsi'] > 60 or last1['rsi'] < 40:
@@ -154,12 +160,11 @@ def run_bot():
 
             buy, sell, price, sl, tp, confidence, accuracy = check_signals(df1m, df15m)
 
+            # ✅ IST TIME
             ist = pytz.timezone('Asia/Kolkata')
-            now = datetime.now(ist).strftime("%Y-%m-%d%I:%M:%S %p")
+            now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
 
-            # ==============================
             # 🔥 AUTO SIGNALS
-            # ==============================
             if buy and last_signal != "BUY":
                 msg = f"""
 🟢 BUY SIGNAL
@@ -175,7 +180,6 @@ def run_bot():
 📉 Entry TF: 1m
 📊 Trend TF: 15m
 """
-                print(msg)
                 send_telegram(msg)
                 last_signal = "BUY"
 
@@ -194,13 +198,10 @@ def run_bot():
 📉 Entry TF: 1m
 📊 Trend TF: 15m
 """
-                print(msg)
                 send_telegram(msg)
                 last_signal = "SELL"
 
-            # ==============================
             # 🎮 MANUAL COMMANDS
-            # ==============================
             if cmd == "BUY":
                 send_telegram(f"🟢 MANUAL BUY at {price}")
 
