@@ -6,12 +6,12 @@ import os
 from threading import Thread
 from flask import Flask
 
-# ================= FLASK (FOR RENDER) =================
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running ✅"
+    return "OK"   # Fast response for UptimeRobot
 
 # ================= CONFIG =================
 TOKEN = os.environ.get("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")
@@ -179,6 +179,7 @@ def accuracy():
 # ================= AUTO BOT =================
 def auto_bot():
     last_signal = None
+    print("🤖 Auto bot started")
 
     while True:
         try:
@@ -220,6 +221,7 @@ def auto_bot():
 # ================= COMMAND BOT =================
 def command_bot():
     global last_update_id
+    print("📩 Command bot started")
 
     while True:
         try:
@@ -230,6 +232,7 @@ def command_bot():
 
                 if "message" in u:
                     text = u["message"].get("text", "")
+                    print("Received:", text)
 
                     if text == "1":
                         sig, conf, reasons = ai_signal()
@@ -255,9 +258,16 @@ def command_bot():
 
 # ================= START =================
 if __name__ == "__main__":
-    Thread(target=auto_bot).start()
-    Thread(target=command_bot).start()
+    print("🚀 Starting Flask first...")
 
-    # 🔥 THIS IS IMPORTANT (PORT BINDING)
     port = int(os.environ.get("PORT", 10000))
+
+    def start_threads():
+        time.sleep(5)
+        print("🔥 Starting bot threads...")
+        Thread(target=auto_bot, daemon=True).start()
+        Thread(target=command_bot, daemon=True).start()
+
+    Thread(target=start_threads).start()
+
     app.run(host="0.0.0.0", port=port)
