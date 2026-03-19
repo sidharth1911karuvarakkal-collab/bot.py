@@ -3,156 +3,259 @@ import pandas as pd
 import numpy as np
 import time
 import os
-from flask import Flask, request
 from threading import Thread
 
-# ================= CONFIG =================
-TOKEN = os.environ.get("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")      # Telegram bot token
-CHAT_ID = os.environ.get("6094849602")  # Your integer Telegram chat ID
-SYMBOL = os.environ.get("SYMBOL", "BTCUSDT")
-CONFIDENCE_THRESHOLD = 75
+TOKEN = os.environ.get("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")
+CHAT_ID = os.environ.get("6094849602")
+SYMBOL = "BTCUSDT"
 
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
-app = Flask(__name__)
-bot_running = False
-
-# ================= ROOT ROUTE =================
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running! ✅"
+last_update_id = None
+trades = []
 
 # ================= TELEGRAM =================
-def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-        print("Telegram Response:", r.text)
-    except Exception as e:
-        print("Telegram Error:", e)
+def send(msg):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-# ================= DATA FETCH =================
-def get_data(interval="1m", limit=200):
-    params = {"symbol": SYMBOL, "interval": interval, "limit": limit}
-    data = requests.get(BINANCE_URL, params=params).json()
+def get_updates():
+    global last_update_id
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    params = {"timeout": 100}
+
+    if last_update_id:
+        params["offset"] = last_update_id + 1
+
+    res = requests.get(url, params=params).json()
+    return res.get("result", [])
+
+# ================= DATA =================
+def get_data(interval):
+    data = requests.get(BINANCE_URL, params={
+        "symbol": SYMBOL,
+        "interval": interval,
+        "limit": 200
+    }).json()
+
     df = pd.DataFrame(data, columns=range(12))
-    df = df[[0,1,2,3,4,5]]
-    df.columns = ["time","open","high","low","close","volume"]
+    df = df[[0,1,2,3,4]]
+    df.columns = ["time","open","high","low","close"]
+
     df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+
     return df
 
 # ================= INDICATORS =================
-def calculate_indicators(df):
+def indicators(df):
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
-    df["sma50"] = df["close"].rolling(50).mean()
-    df["sma200"] = df["close"].rolling(200).mean()
 
+    ema12 = df["close"].ewm(span=12).mean()
+    ema26 = df["close"].ewm(span=26).mean()
+    df["macd"] = ema12 - ema26
+    df["signal"] = df["macd"].ewm(span=9).mean()
+
+    # RSI
     delta = df["close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    ema12 = df["close"].ewm(span=12).mean()
-    ema26 = df["close"].ewm(span=26).mean()
-    df["macd"] = ema12 - ema26
-    df["signal"] = df["macd"].ewm(span=9).mean()
+    # Bollinger
+    df["bb_mid"] = df["close"].rolling(20).mean()
+    df["bb_std"] = df["close"].rolling(20).std()
+    df["bb_upper"] = df["bb_mid"] + 2 * df["bb_std"]
+    df["bb_lower"] = df["bb_mid"] - 2 * df["bb_std"]
+
     return df
 
-# ================= SIGNAL GENERATION =================
-def generate_signal(hf, mf, lf):
+# ================= AI SIGNAL =================
+def ai_signal():
+    hf = indicators(get_data("1h"))
+    mf = indicators(get_data("15m"))
+    lf = indicators(get_data("1m"))
+
     score = 0
     reasons = []
 
-    # High timeframe (1h)
-    latest = hf.iloc[-1]
-    if latest["ema20"] > latest["ema50"]:
-        score += 8; reasons.append("1h EMA Bull")
-    else: score -= 8; reasons.append("1h EMA Bear")
-    if latest["sma50"] > latest["sma200"]:
-        score += 4; reasons.append("1h SMA Bull")
-    else: score -= 4; reasons.append("1h SMA Bear")
-    if latest["macd"] > latest["signal"]:
-        score += 3; reasons.append("1h MACD Bull")
-    else: score -= 3; reasons.append("1h MACD Bear")
+    h = hf.iloc[-1]
+    m = mf.iloc[-1]
+    l = lf.iloc[-1]
 
-    # Medium timeframe (15m)
-    latest = mf.iloc[-1]
-    if latest["ema20"] > latest["ema50"]:
-        score += 6; reasons.append("15m EMA Bull")
-    else: score -= 6; reasons.append("15m EMA Bear")
-    if latest["sma50"] > latest["sma200"]:
-        score += 4; reasons.append("15m SMA Bull")
-    else: score -= 4; reasons.append("15m SMA Bear")
-    if latest["macd"] > latest["signal"]:
-        score += 3; reasons.append("15m MACD Bull")
-    else: score -= 3; reasons.append("15m MACD Bear")
+    # Trend
+    if h["ema20"] > h["ema50"]:
+        score += 12; reasons.append("1h Bull")
+    else:
+        score -= 12; reasons.append("1h Bear")
 
-    # Low timeframe (1m)
-    latest = lf.iloc[-1]
-    if latest["close"] > latest["ema20"]:
-        score += 5; reasons.append("1m Price>EMA20")
-    else: score -= 5; reasons.append("1m Price<EMA20")
-    if latest["macd"] > latest["signal"]:
-        score += 3; reasons.append("1m MACD Bull")
-    else: score -= 3; reasons.append("1m MACD Bear")
+    if m["ema20"] > m["ema50"]:
+        score += 8; reasons.append("15m Bull")
+    else:
+        score -= 8; reasons.append("15m Bear")
 
-    confidence = max(0, min(100, int(score*2.5)))
-    if confidence >= CONFIDENCE_THRESHOLD:
+    # RSI
+    if m["rsi"] < 30:
+        score += 7; reasons.append("15m Oversold")
+    elif m["rsi"] > 70:
+        score -= 7; reasons.append("15m Overbought")
+
+    if l["rsi"] < 30:
+        score += 6; reasons.append("1m Oversold")
+    elif l["rsi"] > 70:
+        score -= 6; reasons.append("1m Overbought")
+
+    # Bollinger
+    if l["close"] < l["bb_lower"]:
+        score += 10; reasons.append("BB Buy")
+    elif l["close"] > l["bb_upper"]:
+        score -= 10; reasons.append("BB Sell")
+
+    # MACD
+    if l["macd"] > l["signal"]:
+        score += 6; reasons.append("MACD Bull")
+    else:
+        score -= 6; reasons.append("MACD Bear")
+
+    confidence = int((score + 50) * 100 / 100)
+    confidence = max(0, min(100, confidence))
+
+    if confidence >= 75:
         return "BUY", confidence, reasons
-    elif confidence <= (100-CONFIDENCE_THRESHOLD):
+    elif confidence <= 25:
         return "SELL", confidence, reasons
     else:
         return None, confidence, reasons
 
-# ================= BOT LOOP =================
-def run_bot():
-    global bot_running
-    send_telegram("🚀 Bot Started 24/7 (1h+15m+1m)")
-    while bot_running:
+# ================= LEVELS =================
+def trade_levels(df, signal):
+    price = df.iloc[-1]["close"]
+
+    tr = np.maximum(df["high"] - df["low"],
+                    np.maximum(abs(df["high"] - df["close"].shift()),
+                               abs(df["low"] - df["close"].shift())))
+    atr = tr.rolling(14).mean().iloc[-1]
+
+    if signal == "BUY":
+        return round(price,2), round(price - 1.5*atr,2), round(price + 2*atr,2)
+    elif signal == "SELL":
+        return round(price,2), round(price + 1.5*atr,2), round(price - 2*atr,2)
+
+    return None, None, None
+
+# ================= TRACKING =================
+def check_trades():
+    global trades
+    df = get_data("1m")
+    price = df.iloc[-1]["close"]
+
+    for t in trades:
+        if t["status"] == "open":
+
+            if t["signal"] == "BUY":
+                if price >= t["target"]:
+                    t["status"] = "win"
+                elif price <= t["sl"]:
+                    t["status"] = "loss"
+
+            elif t["signal"] == "SELL":
+                if price <= t["target"]:
+                    t["status"] = "win"
+                elif price >= t["sl"]:
+                    t["status"] = "loss"
+
+def accuracy():
+    wins = sum(1 for t in trades if t["status"] == "win")
+    losses = sum(1 for t in trades if t["status"] == "loss")
+    total = wins + losses
+    return round((wins/total)*100,2) if total else 0
+
+# ================= AUTO BOT =================
+def auto_bot():
+    last_signal = None
+
+    while True:
         try:
-            hf = calculate_indicators(get_data("1h",200))
-            mf = calculate_indicators(get_data("15m",200))
-            lf = calculate_indicators(get_data("1m",200))
-            sig, conf, reason = generate_signal(hf, mf, lf)
-            if sig:
-                price = lf.iloc[-1]["close"]
-                send_telegram(f"📊 SIGNAL: {sig}\n💰 Price: {price}\n🔥 Confidence: {conf}%\n📌 Reasons: {', '.join(reason)}")
+            sig, conf, reasons = ai_signal()
+            check_trades()
+
+            if sig and sig != last_signal:
+                df = get_data("1m")
+                entry, sl, target = trade_levels(df, sig)
+
+                trades.append({
+                    "signal": sig,
+                    "entry": entry,
+                    "sl": sl,
+                    "target": target,
+                    "status": "open"
+                })
+
+                send(f"""🚨 AUTO SIGNAL
+📊 {sig}
+🔥 {conf}%
+
+🎯 Entry: {entry}
+🛑 SL: {sl}
+💰 Target: {target}
+
+📌 {', '.join(reasons)}
+📊 Accuracy: {accuracy()}%
+""")
+
+                last_signal = sig
+
             time.sleep(60)
+
         except Exception as e:
-            send_telegram(f"⚠️ Error: {e}")
+            print("Auto Error:", e)
             time.sleep(60)
 
-def start_bot_thread():
-    global bot_running
-    if not bot_running:
-        t = Thread(target=run_bot)
-        t.start()
-        bot_running = True
+# ================= COMMAND BOT =================
+def command_bot():
+    global last_update_id
 
-# ================= TELEGRAM WEBHOOK =================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        data = request.json
-        if "message" in data and "text" in data["message"]:
-            text = data["message"]["text"]
-            # Fetch data for single signal
-            hf = calculate_indicators(get_data("1h",200))
-            mf = calculate_indicators(get_data("15m",200))
-            lf = calculate_indicators(get_data("1m",200))
-            sig, conf, reasons = generate_signal(hf, mf, lf)
-            if text == "1":
-                send_telegram(f"📊 SIGNAL: {sig if sig else 'No Signal'}\n💰 Price: {lf.iloc[-1]['close']}\n🔥 Confidence: {conf}%\n📌 Reasons: {', '.join(reasons)}")
-            elif text.lower() == "start":
-                start_bot_thread()
-        return {"ok": True}
-    except Exception as e:
-        print("Webhook Error:", e)
-        return {"ok": False, "error": str(e)}
+    while True:
+        try:
+            updates = get_updates()
+
+            for u in updates:
+                last_update_id = u["update_id"]
+
+                if "message" in u:
+                    text = u["message"].get("text", "")
+
+                    if text == "1":
+                        sig, conf, reasons = ai_signal()
+                        df = get_data("1m")
+                        entry, sl, target = trade_levels(df, sig)
+
+                        send(f"""📊 {sig if sig else 'No Signal'}
+🔥 {conf}%
+
+🎯 Entry: {entry}
+🛑 SL: {sl}
+💰 Target: {target}
+
+📌 {', '.join(reasons)}
+📊 Accuracy: {accuracy()}%
+""")
+
+            time.sleep(2)
+
+        except Exception as e:
+            print("Cmd Error:", e)
+            time.sleep(5)
 
 # ================= START =================
-if __name__=="__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    send("🚀 BOT LIVE (POLLING MODE)")
+
+    Thread(target=auto_bot).start()
+    Thread(target=command_bot).start()
+
+    while True:
+        time.sleep(60)
