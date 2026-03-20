@@ -207,6 +207,18 @@ def adjust_strategy():
     return "CONSERVATIVE" if len(losses) > len(wins) else "AGGRESSIVE"
 
 # ==============================
+# ❤️ HEARTBEAT (1 HOUR)
+# ==============================
+def heartbeat():
+    while True:
+        try:
+            now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
+            send_telegram(f"💓 BTC Bot Alive - {now}")
+        except:
+            pass
+        time.sleep(3600)  # 1 hour
+
+# ==============================
 # 🤖 BOT LOOP
 # ==============================
 def run_bot():
@@ -225,13 +237,11 @@ def run_bot():
 
             features = extract_features(df1)
 
-            # Label creation
             if len(df1) > 5:
                 label = 1 if df1.iloc[-1]['close'] > df1.iloc[-5]['close'] else 0
                 X_data.append(features)
                 y_data.append(label)
 
-            # Train model
             if len(X_data) > 150 and not model_trained:
                 rf_model.fit(X_data, y_data)
                 gb_model.fit(X_data, y_data)
@@ -268,8 +278,7 @@ def run_bot():
             ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
 
             if buy_score >= required_score and trend_up:
-                send_telegram(f"""
-🟢 BUY BTC/USDT
+                send_telegram(f"""🟢 BUY BTC/USDT
 
 Price: {price}
 TP: {tp}
@@ -291,8 +300,7 @@ Time: {ist}
                 last_signal_type = "BUY"
 
             elif sell_score >= required_score and trend_down:
-                send_telegram(f"""
-🔴 SELL BTC/USDT
+                send_telegram(f"""🔴 SELL BTC/USDT
 
 Price: {price}
 TP: {tp}
@@ -333,4 +341,5 @@ def home():
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
+    threading.Thread(target=heartbeat).start()  # ✅ added
     app.run(host="0.0.0.0", port=10000)
