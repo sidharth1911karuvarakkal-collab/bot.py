@@ -29,19 +29,16 @@ def send_telegram(msg):
 exchange = ccxt.okx({"enableRateLimit": True})
 
 # ==============================
-# 🔹 SYMBOLS
+# 🔹 SYMBOLS (ONLY 2)
 # ==============================
-symbols = [
-    "BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
-    "DOGE/USDT","ADA/USDT","AVAX/USDT","DOT/USDT","TRX/USDT"
-]
+symbols = ["BTC/USDT", "ETH/USDT"]
 
 # ==============================
 # ⚙️ CONTROL
 # ==============================
 last_signal_time = {s: 0 for s in symbols}
 last_signal_type = {s: "" for s in symbols}
-cooldown = 300
+cooldown = 300   # 5 min
 api_delay = 1
 
 # ==============================
@@ -93,70 +90,71 @@ def get_data(symbol, tf):
     return df
 
 # ==============================
-# 🧠 SCORING STRATEGY
+# 🧠 SCORING STRATEGY (FIXED)
 # ==============================
 def check_signals(df1m, df15m):
     last = df1m.iloc[-1]
     prev = df1m.iloc[-2]
     trend = df15m.iloc[-1]
 
-    score = 0
+    buy_score = 0
+    sell_score = 0
     reasons = []
 
     # MA crossover
     if prev['ma5'] < prev['ma10'] and last['ma5'] > last['ma10']:
-        score += 1
+        buy_score += 1
         reasons.append("MA Bullish")
     elif prev['ma5'] > prev['ma10'] and last['ma5'] < last['ma10']:
-        score += 1
+        sell_score += 1
         reasons.append("MA Bearish")
 
     # EMA
     if last['ema5'] > last['ema10']:
-        score += 1
+        buy_score += 1
         reasons.append("EMA Bullish")
     else:
-        score += 1
+        sell_score += 1
         reasons.append("EMA Bearish")
 
-    # RSI relaxed
-    if last['rsi'] > 45:
-        score += 1
+    # RSI
+    if last['rsi'] > 55:
+        buy_score += 1
         reasons.append("RSI Strong")
-    elif last['rsi'] < 55:
-        score += 1
+    elif last['rsi'] < 45:
+        sell_score += 1
         reasons.append("RSI Weak")
 
     # MACD
     if last['macd'] > last['macd_signal']:
-        score += 1
+        buy_score += 1
         reasons.append("MACD Bullish")
     else:
-        score += 1
+        sell_score += 1
         reasons.append("MACD Bearish")
 
     # Stochastic
     if last['stoch_k'] > last['stoch_d']:
-        score += 1
+        buy_score += 1
         reasons.append("Stoch Bullish")
     else:
-        score += 1
+        sell_score += 1
         reasons.append("Stoch Bearish")
 
-    # Bollinger (optional boost)
+    # Bollinger
     if last['close'] < last['bb_lower']:
-        score += 1
+        buy_score += 1
         reasons.append("BB Oversold")
     elif last['close'] > last['bb_upper']:
-        score += 1
+        sell_score += 1
         reasons.append("BB Overbought")
 
-    # Trend (mandatory)
+    # Trend filter
     trend_up = trend['close'] > trend['ma30']
     trend_down = trend['close'] < trend['ma30']
 
-    buy = score >= 4 and trend_up
-    sell = score >= 4 and trend_down
+    buy = buy_score >= 4 and trend_up
+    sell = sell_score >= 4 and trend_down
 
     price = last['close']
     atr = last['atr']
@@ -164,9 +162,9 @@ def check_signals(df1m, df15m):
     sl = price - atr if buy else price + atr
     tp = price + 2*atr if buy else price - 2*atr
 
-    confidence = int((score / 7) * 100)
+    confidence = int((max(buy_score, sell_score) / 6) * 100)
 
-    return buy, sell, price, sl, tp, confidence, score, reasons
+    return buy, sell, price, sl, tp, confidence, buy_score, sell_score, reasons
 
 # ==============================
 # 🤖 PROCESS SYMBOL
@@ -182,11 +180,12 @@ def process_symbol(symbol):
             if df1 is None or df15 is None:
                 continue
 
-            buy, sell, price, sl, tp, conf, score, reasons = check_signals(df1, df15)
+            buy, sell, price, sl, tp, conf, b_score, s_score, reasons = check_signals(df1, df15)
 
             now = time.time()
 
             if now - last_signal_time[symbol] < cooldown:
+                time.sleep(api_delay)
                 continue
 
             ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
@@ -200,7 +199,8 @@ TP: {tp}
 SL: {sl}
 
 Confidence: {conf}%
-Score: {score}/7
+Buy Score: {b_score}
+Sell Score: {s_score}
 
 Reason:
 {', '.join(reasons)}
@@ -220,7 +220,8 @@ TP: {tp}
 SL: {sl}
 
 Confidence: {conf}%
-Score: {score}/7
+Buy Score: {b_score}
+Sell Score: {s_score}
 
 Reason:
 {', '.join(reasons)}
@@ -238,12 +239,11 @@ Time: {ist}
             time.sleep(5)
 
 # ==============================
-# ❤️ HEARTBEAT
+# ❤️ HEARTBEAT (15 min)
 # ==============================
 def heartbeat():
     while True:
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist).strftime("%I:%M %p")
+        now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
         send_telegram(f"💓 Bot Alive - {now}")
         time.sleep(900)
 
@@ -251,7 +251,7 @@ def heartbeat():
 # 🚀 MAIN BOT
 # ==============================
 def run_bot():
-    send_telegram("🚀 SCORING BOT LIVE")
+    send_telegram("🚀 BTC + ETH BOT LIVE")
 
     for sym in symbols:
         threading.Thread(target=process_symbol, args=(sym,), daemon=True).start()
@@ -268,7 +268,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Scoring Bot Running"
+    return "🚀 Bot Running"
 
 # ==============================
 # ▶ START
