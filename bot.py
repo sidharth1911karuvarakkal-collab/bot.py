@@ -9,7 +9,7 @@ from datetime import datetime
 import pytz
 
 # ==============================
-# 🔑 TELEGRAM SETTINGS
+# 📌 TELEGRAM SETTINGS
 # ==============================
 TOKEN = "8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c"
 CHAT_ID = "6094849602"
@@ -23,7 +23,7 @@ def send_telegram(msg):
         print("Telegram Error:", e)
 
 # ==============================
-# 📥 TELEGRAM POLLING (NO SPAM)
+# 🔔 TELEGRAM POLLING (NO SPAM)
 # ==============================
 last_update_id = None
 last_command_time = 0
@@ -46,22 +46,15 @@ def check_telegram_commands():
 
             if "message" in update:
                 text = update["message"].get("text", "")
-
                 current_time = time.time()
 
-                # ⛔ prevent spam
+                # prevent spam
                 if current_time - last_command_time < command_cooldown:
                     return None
 
-                if text == "1":
+                if text in ["1", "2"]:
                     last_command_time = current_time
-                    send_telegram("✅ Manual BUY Triggered")
-                    return "BUY"
-
-                elif text == "2":
-                    last_command_time = current_time
-                    send_telegram("🔴 Manual SELL Triggered")
-                    return "SELL"
+                    return text  # return "1" or "2" for manual check
 
     except Exception as e:
         print("Polling error:", e)
@@ -69,7 +62,7 @@ def check_telegram_commands():
     return None
 
 # ==============================
-# 📊 EXCHANGE
+# 🏦 EXCHANGE
 # ==============================
 exchange = ccxt.okx()
 symbol = 'BTC/USDT'
@@ -89,7 +82,7 @@ def get_data(timeframe):
     return df
 
 # ==============================
-# 🤖 STRATEGY
+# 🧐 STRATEGY
 # ==============================
 def check_signals(df1m, df15m):
     last1 = df1m.iloc[-1]
@@ -153,21 +146,24 @@ def run_bot():
 
     while True:
         try:
-            cmd = check_telegram_commands()
+            # 1️⃣ Check manual commands
+            cmd = check_telegram_commands()  # returns "1", "2", or None
 
+            # 2️⃣ Fetch latest data
             df1m = get_data('1m')
             df15m = get_data('15m')
 
+            # 3️⃣ Check auto strategy signals
             buy, sell, price, sl, tp, confidence, accuracy = check_signals(df1m, df15m)
 
-            # ✅ IST TIME
+            # IST Time
             ist = pytz.timezone('Asia/Kolkata')
             now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
 
-            # 🔥 AUTO SIGNALS
+            # 4️⃣ AUTO SIGNALS
             if buy and last_signal != "BUY":
                 msg = f"""
-🟢 BUY SIGNAL
+💰 BUY SIGNAL
 
 💰 Price: {price}
 🎯 TP: {tp}
@@ -177,7 +173,7 @@ def run_bot():
 📈 Accuracy: {accuracy}%
 
 ⏱ Time: {now}
-📉 Entry TF: 1m
+📝 Entry TF: 1m
 📊 Trend TF: 15m
 """
                 send_telegram(msg)
@@ -185,7 +181,7 @@ def run_bot():
 
             elif sell and last_signal != "SELL":
                 msg = f"""
-🔴 SELL SIGNAL
+❌ SELL SIGNAL
 
 💰 Price: {price}
 🎯 TP: {tp}
@@ -195,18 +191,77 @@ def run_bot():
 📈 Accuracy: {accuracy}%
 
 ⏱ Time: {now}
-📉 Entry TF: 1m
+📝 Entry TF: 1m
 📊 Trend TF: 15m
 """
                 send_telegram(msg)
                 last_signal = "SELL"
 
-            # 🎮 MANUAL COMMANDS
-            if cmd == "BUY":
-                send_telegram(f"🟢 MANUAL BUY at {price}")
+            # 5️⃣ MANUAL COMMANDS
+            if cmd in ["1", "2"]:
+                last1 = df1m.iloc[-1]
+                prev1 = df1m.iloc[-2]
+                last15 = df15m.iloc[-1]
 
-            elif cmd == "SELL":
-                send_telegram(f"🔴 MANUAL SELL at {price}")
+                reasons = []
+
+                if cmd == "1":  # Manual BUY
+                    if not buy:
+                        if not (prev1['ma5'] < prev1['ma10'] and last1['ma5'] > last1['ma10']):
+                            reasons.append("MA crossover condition not met")
+                        if not (last1['rsi'] > 50):
+                            reasons.append(f"RSI too low ({last1['rsi']:.2f})")
+                        if not (last15['close'] > last15['ma30']):
+                            reasons.append("15m trend not bullish")
+                    else:
+                        reasons.append("All conditions met ✅")
+
+                    msg = f"""
+💰 MANUAL BUY CHECK
+
+💰 Price: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
+
+📊 Confidence: {confidence}%
+📈 Accuracy: {accuracy}%
+
+⚡ Conditions: {' | '.join(reasons)}
+
+⏱ Time: {now}
+📝 Entry TF: 1m
+📊 Trend TF: 15m
+"""
+                    send_telegram(msg)
+
+                elif cmd == "2":  # Manual SELL
+                    if not sell:
+                        if not (prev1['ma5'] > prev1['ma10'] and last1['ma5'] < last1['ma10']):
+                            reasons.append("MA crossover condition not met")
+                        if not (last1['rsi'] < 50):
+                            reasons.append(f"RSI too high ({last1['rsi']:.2f})")
+                        if not (last15['close'] < last15['ma30']):
+                            reasons.append("15m trend not bearish")
+                    else:
+                        reasons.append("All conditions met ✅")
+
+                    msg = f"""
+❌ MANUAL SELL CHECK
+
+💰 Price: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
+
+📊 Confidence: {confidence}%
+📈 Accuracy: {accuracy}%
+
+⚡ Conditions: {' | '.join(reasons)}
+
+⏱ Time: {now}
+📝 Entry TF: 1m
+📊 Trend TF: 15m
+"""
+                    send_telegram(msg)
 
             time.sleep(30)
 
@@ -225,7 +280,7 @@ def home():
     return "🚀 BTC Bot Running!"
 
 # ==============================
-# ▶️ START
+# ▴ START
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
