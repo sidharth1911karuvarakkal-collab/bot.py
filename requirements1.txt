@@ -1,0 +1,6 @@
+ccxt==3.0.86
+pandas==2.1.1
+ta==0.10.2
+requests==2.31.0
+Flask==2.3.6
+pytz==2026.1
