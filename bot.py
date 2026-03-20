@@ -28,26 +28,22 @@ def send_telegram(msg):
 # ==============================
 exchange = ccxt.okx({"enableRateLimit": True})
 
-# ==============================
-# 🔹 SYMBOLS (ONLY 2)
-# ==============================
-symbols = ["BTC/USDT", "ETH/USDT"]
+symbol = "BTC/USDT"
 
 # ==============================
 # ⚙️ CONTROL
 # ==============================
-last_signal_time = {s: 0 for s in symbols}
-last_signal_type = {s: "" for s in symbols}
+last_signal_time = 0
+last_signal_type = ""
 cooldown = 300   # 5 min
-api_delay = 1
 
 # ==============================
 # 📈 SAFE FETCH
 # ==============================
-def safe_fetch(symbol, timeframe):
+def safe_fetch(tf):
     for _ in range(3):
         try:
-            return exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+            return exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
         except:
             time.sleep(2)
     return None
@@ -55,8 +51,8 @@ def safe_fetch(symbol, timeframe):
 # ==============================
 # 📊 INDICATORS
 # ==============================
-def get_data(symbol, tf):
-    ohlcv = safe_fetch(symbol, tf)
+def get_data(tf):
+    ohlcv = safe_fetch(tf)
     if ohlcv is None:
         return None
 
@@ -90,7 +86,7 @@ def get_data(symbol, tf):
     return df
 
 # ==============================
-# 🧠 SCORING STRATEGY (FIXED)
+# 🧠 STRATEGY
 # ==============================
 def check_signals(df1m, df15m):
     last = df1m.iloc[-1]
@@ -149,7 +145,7 @@ def check_signals(df1m, df15m):
         sell_score += 1
         reasons.append("BB Overbought")
 
-    # Trend filter
+    # Trend filter (15m)
     trend_up = trend['close'] > trend['ma30']
     trend_down = trend['close'] < trend['ma30']
 
@@ -160,22 +156,24 @@ def check_signals(df1m, df15m):
     atr = last['atr']
 
     sl = price - atr if buy else price + atr
-    tp = price + 2*atr if buy else price - 2*atr
+    tp = price + 2 * atr if buy else price - 2 * atr
 
     confidence = int((max(buy_score, sell_score) / 6) * 100)
 
     return buy, sell, price, sl, tp, confidence, buy_score, sell_score, reasons
 
 # ==============================
-# 🤖 PROCESS SYMBOL
+# 🤖 BOT LOOP
 # ==============================
-def process_symbol(symbol):
+def run_bot():
     global last_signal_time, last_signal_type
+
+    send_telegram("🚀 BTC BOT LIVE")
 
     while True:
         try:
-            df1 = get_data(symbol, '1m')
-            df15 = get_data(symbol, '15m')
+            df1 = get_data('1m')
+            df15 = get_data('15m')
 
             if df1 is None or df15 is None:
                 continue
@@ -184,15 +182,15 @@ def process_symbol(symbol):
 
             now = time.time()
 
-            if now - last_signal_time[symbol] < cooldown:
-                time.sleep(api_delay)
+            if now - last_signal_time < cooldown:
+                time.sleep(5)
                 continue
 
             ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
 
-            if buy and last_signal_type[symbol] != "BUY":
+            if buy and last_signal_type != "BUY":
                 msg = f"""
-🟢 BUY {symbol}
+🟢 BUY BTC/USDT
 
 Price: {price}
 TP: {tp}
@@ -208,12 +206,12 @@ Reason:
 Time: {ist}
 """
                 send_telegram(msg)
-                last_signal_time[symbol] = now
-                last_signal_type[symbol] = "BUY"
+                last_signal_time = now
+                last_signal_type = "BUY"
 
-            elif sell and last_signal_type[symbol] != "SELL":
+            elif sell and last_signal_type != "SELL":
                 msg = f"""
-🔴 SELL {symbol}
+🔴 SELL BTC/USDT
 
 Price: {price}
 TP: {tp}
@@ -229,37 +227,23 @@ Reason:
 Time: {ist}
 """
                 send_telegram(msg)
-                last_signal_time[symbol] = now
-                last_signal_type[symbol] = "SELL"
+                last_signal_time = now
+                last_signal_type = "SELL"
 
-            time.sleep(api_delay)
+            time.sleep(10)
 
         except Exception as e:
-            print(symbol, e)
+            print("Error:", e)
             time.sleep(5)
 
 # ==============================
-# ❤️ HEARTBEAT (15 min)
+# ❤️ HEARTBEAT
 # ==============================
 def heartbeat():
     while True:
         now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
-        send_telegram(f"💓 Bot Alive - {now}")
+        send_telegram(f"💓 BTC Bot Alive - {now}")
         time.sleep(900)
-
-# ==============================
-# 🚀 MAIN BOT
-# ==============================
-def run_bot():
-    send_telegram("🚀 BTC + ETH BOT LIVE")
-
-    for sym in symbols:
-        threading.Thread(target=process_symbol, args=(sym,), daemon=True).start()
-
-    threading.Thread(target=heartbeat, daemon=True).start()
-
-    while True:
-        time.sleep(10)
 
 # ==============================
 # 🌐 FLASK
@@ -268,11 +252,12 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Bot Running"
+    return "🚀 BTC Bot Running"
 
 # ==============================
 # ▶ START
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
+    threading.Thread(target=heartbeat).start()
     app.run(host="0.0.0.0", port=10000)
