@@ -1,6 +1,9 @@
-ccxt
-pandas
-ta
-flask
-requests
-pytz
+ccxt==4.2.85
+pandas==2.2.2
+ta==0.11.0
+numpy==1.26.4
+requests==2.31.0
+flask==3.0.3
+pytz==2024.1
+scikit-learn==1.4.2
+joblib==1.4.2
