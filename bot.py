@@ -7,6 +7,10 @@ from flask import Flask
 import threading
 from datetime import datetime
 import pytz
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+import joblib
+import os
 
 # ==============================
 # 🔐 TELEGRAM SETTINGS
@@ -27,7 +31,6 @@ def send_telegram(msg):
 # 🏦 EXCHANGE
 # ==============================
 exchange = ccxt.okx({"enableRateLimit": True})
-
 symbol = "BTC/USDT"
 
 # ==============================
@@ -35,7 +38,35 @@ symbol = "BTC/USDT"
 # ==============================
 last_signal_time = 0
 last_signal_type = ""
-cooldown = 300   # 5 min
+cooldown = 300  # 5 min
+
+# ==============================
+# 🤖 AI MODELS
+# ==============================
+rf_model = RandomForestClassifier(n_estimators=100)
+gb_model = GradientBoostingClassifier()
+
+MODEL_FILE = "model.pkl"
+model_trained = False
+X_data = []
+y_data = []
+
+# ==============================
+# 🧠 RL MEMORY
+# ==============================
+trade_memory = []
+
+# ==============================
+# 📦 MODEL SAVE/LOAD
+# ==============================
+def save_model():
+    joblib.dump((rf_model, gb_model), MODEL_FILE)
+
+def load_model():
+    global model_trained, rf_model, gb_model
+    if os.path.exists(MODEL_FILE):
+        rf_model, gb_model = joblib.load(MODEL_FILE)
+        model_trained = True
 
 # ==============================
 # 📈 SAFE FETCH
@@ -86,7 +117,41 @@ def get_data(tf):
     return df
 
 # ==============================
-# 🧠 STRATEGY
+# 🧠 FEATURES
+# ==============================
+def extract_features(df):
+    last = df.iloc[-1]
+    return [
+        last['ma5'] - last['ma10'],
+        last['ema5'] - last['ema10'],
+        last['rsi'],
+        last['macd'] - last['macd_signal'],
+        last['stoch_k'] - last['stoch_d'],
+        last['close'] - last['bb_lower'],
+        last['bb_upper'] - last['close'],
+        last['atr'],
+        last['volume'],
+        last['close'] - df['close'].mean()
+    ]
+
+# ==============================
+# 📊 MARKET REGIME
+# ==============================
+def market_regime(df15):
+    trend = df15.iloc[-1]
+    strength = abs(trend['close'] - trend['ma30'])
+    return "TREND" if strength > 80 else "SIDEWAYS"
+
+# ==============================
+# 🤖 ENSEMBLE PREDICTION
+# ==============================
+def ensemble_predict(features):
+    rf_prob = rf_model.predict_proba([features])[0]
+    gb_prob = gb_model.predict_proba([features])[0]
+    return (max(rf_prob) + max(gb_prob)) / 2 * 100
+
+# ==============================
+# 🧠 STRATEGY SCORING
 # ==============================
 def check_signals(df1m, df15m):
     last = df1m.iloc[-1]
@@ -97,78 +162,58 @@ def check_signals(df1m, df15m):
     sell_score = 0
     reasons = []
 
-    # MA crossover
     if prev['ma5'] < prev['ma10'] and last['ma5'] > last['ma10']:
-        buy_score += 1
-        reasons.append("MA Bullish")
+        buy_score += 1; reasons.append("MA Bullish")
     elif prev['ma5'] > prev['ma10'] and last['ma5'] < last['ma10']:
-        sell_score += 1
-        reasons.append("MA Bearish")
+        sell_score += 1; reasons.append("MA Bearish")
 
-    # EMA
     if last['ema5'] > last['ema10']:
-        buy_score += 1
-        reasons.append("EMA Bullish")
+        buy_score += 1; reasons.append("EMA Bullish")
     else:
-        sell_score += 1
-        reasons.append("EMA Bearish")
+        sell_score += 1; reasons.append("EMA Bearish")
 
-    # RSI
     if last['rsi'] > 55:
-        buy_score += 1
-        reasons.append("RSI Strong")
+        buy_score += 1; reasons.append("RSI Strong")
     elif last['rsi'] < 45:
-        sell_score += 1
-        reasons.append("RSI Weak")
+        sell_score += 1; reasons.append("RSI Weak")
 
-    # MACD
     if last['macd'] > last['macd_signal']:
-        buy_score += 1
-        reasons.append("MACD Bullish")
+        buy_score += 1; reasons.append("MACD Bullish")
     else:
-        sell_score += 1
-        reasons.append("MACD Bearish")
+        sell_score += 1; reasons.append("MACD Bearish")
 
-    # Stochastic
     if last['stoch_k'] > last['stoch_d']:
-        buy_score += 1
-        reasons.append("Stoch Bullish")
+        buy_score += 1; reasons.append("Stoch Bullish")
     else:
-        sell_score += 1
-        reasons.append("Stoch Bearish")
+        sell_score += 1; reasons.append("Stoch Bearish")
 
-    # Bollinger
     if last['close'] < last['bb_lower']:
-        buy_score += 1
-        reasons.append("BB Oversold")
+        buy_score += 1; reasons.append("BB Oversold")
     elif last['close'] > last['bb_upper']:
-        sell_score += 1
-        reasons.append("BB Overbought")
+        sell_score += 1; reasons.append("BB Overbought")
 
-    # Trend filter (15m)
     trend_up = trend['close'] > trend['ma30']
     trend_down = trend['close'] < trend['ma30']
 
-    buy = buy_score >= 4 and trend_up
-    sell = sell_score >= 4 and trend_down
+    return buy_score, sell_score, reasons, trend_up, trend_down
 
-    price = last['close']
-    atr = last['atr']
+# ==============================
+# 🧠 RL ADAPTIVE MODE
+# ==============================
+def adjust_strategy():
+    wins = [t for t in trade_memory if t.get("reward", 0) > 0]
+    losses = [t for t in trade_memory if t.get("reward", 0) < 0]
 
-    sl = price - atr if buy else price + atr
-    tp = price + 2 * atr if buy else price - 2 * atr
-
-    confidence = int((max(buy_score, sell_score) / 6) * 100)
-
-    return buy, sell, price, sl, tp, confidence, buy_score, sell_score, reasons
+    return "CONSERVATIVE" if len(losses) > len(wins) else "AGGRESSIVE"
 
 # ==============================
 # 🤖 BOT LOOP
 # ==============================
 def run_bot():
-    global last_signal_time, last_signal_type
+    global last_signal_time, last_signal_type, model_trained
 
-    send_telegram("🚀 BTC BOT LIVE")
+    load_model()
+    send_telegram("🚀 INSTITUTIONAL BTC BOT LIVE")
 
     while True:
         try:
@@ -178,55 +223,93 @@ def run_bot():
             if df1 is None or df15 is None:
                 continue
 
-            buy, sell, price, sl, tp, conf, b_score, s_score, reasons = check_signals(df1, df15)
+            features = extract_features(df1)
+
+            # Label creation
+            if len(df1) > 5:
+                label = 1 if df1.iloc[-1]['close'] > df1.iloc[-5]['close'] else 0
+                X_data.append(features)
+                y_data.append(label)
+
+            # Train model
+            if len(X_data) > 150 and not model_trained:
+                rf_model.fit(X_data, y_data)
+                gb_model.fit(X_data, y_data)
+                save_model()
+                model_trained = True
+                send_telegram("🤖 AI TRAINED")
+
+            ai_prob = ensemble_predict(features) if model_trained else 0
+
+            buy_score, sell_score, reasons, trend_up, trend_down = check_signals(df1, df15)
+
+            regime = market_regime(df15)
+            mode = adjust_strategy()
+
+            required_score = 5 if mode == "CONSERVATIVE" else 4
+            required_ai = 75 if mode == "CONSERVATIVE" else 65
+
+            if regime == "SIDEWAYS":
+                continue
+
+            if model_trained and ai_prob < required_ai:
+                continue
 
             now = time.time()
-
             if now - last_signal_time < cooldown:
-                time.sleep(5)
                 continue
+
+            price = df1.iloc[-1]['close']
+            atr = df1.iloc[-1]['atr']
+
+            sl = price - (1.5 * atr)
+            tp = price + (2.5 * atr)
 
             ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
 
-            if buy and last_signal_type != "BUY":
-                msg = f"""
+            if buy_score >= required_score and trend_up:
+                send_telegram(f"""
 🟢 BUY BTC/USDT
 
 Price: {price}
 TP: {tp}
 SL: {sl}
 
-Confidence: {conf}%
-Buy Score: {b_score}
-Sell Score: {s_score}
+AI: {ai_prob:.2f}%
+Mode: {mode}
+Market: {regime}
+
+Buy Score: {buy_score}
+Sell Score: {sell_score}
 
 Reason:
 {', '.join(reasons)}
 
 Time: {ist}
-"""
-                send_telegram(msg)
+""")
                 last_signal_time = now
                 last_signal_type = "BUY"
 
-            elif sell and last_signal_type != "SELL":
-                msg = f"""
+            elif sell_score >= required_score and trend_down:
+                send_telegram(f"""
 🔴 SELL BTC/USDT
 
 Price: {price}
 TP: {tp}
 SL: {sl}
 
-Confidence: {conf}%
-Buy Score: {b_score}
-Sell Score: {s_score}
+AI: {ai_prob:.2f}%
+Mode: {mode}
+Market: {regime}
+
+Buy Score: {buy_score}
+Sell Score: {sell_score}
 
 Reason:
 {', '.join(reasons)}
 
 Time: {ist}
-"""
-                send_telegram(msg)
+""")
                 last_signal_time = now
                 last_signal_type = "SELL"
 
@@ -237,27 +320,17 @@ Time: {ist}
             time.sleep(5)
 
 # ==============================
-# ❤️ HEARTBEAT
-# ==============================
-def heartbeat():
-    while True:
-        now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
-        send_telegram(f"BTC Bot Active - {now}")
-        time.sleep(7200)
-
-# ==============================
 # 🌐 FLASK
 # ==============================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 BTC Bot Running"
+    return "🚀 Institutional Bot Running"
 
 # ==============================
 # ▶ START
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
-    threading.Thread(target=heartbeat).start()
     app.run(host="0.0.0.0", port=10000)
