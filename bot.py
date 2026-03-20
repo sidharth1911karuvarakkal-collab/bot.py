@@ -243,7 +243,7 @@ def heartbeat():
     while True:
         now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
         send_telegram(f"💓 BTC Bot Alive - {now}")
-        time.sleep(900)
+        time.sleep(3600)
 
 # ==============================
 # 🌐 FLASK
