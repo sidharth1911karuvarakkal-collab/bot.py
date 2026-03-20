@@ -23,11 +23,11 @@ def send_telegram(msg):
         print("Telegram Error:", e)
 
 # ==============================
-# 🔔 TELEGRAM POLLING (NO SPAM)
+# 🔔 TELEGRAM POLLING FOR "y"
 # ==============================
 last_update_id = None
 last_command_time = 0
-command_cooldown = 60   # seconds
+command_cooldown = 10  # seconds for ping
 
 def check_telegram_commands():
     global last_update_id, last_command_time
@@ -45,16 +45,15 @@ def check_telegram_commands():
             last_update_id = update["update_id"]
 
             if "message" in update:
-                text = update["message"].get("text", "")
+                text = update["message"].get("text", "").lower()
                 current_time = time.time()
 
-                # prevent spam
                 if current_time - last_command_time < command_cooldown:
-                    return None
+                    continue  # prevent spam
 
-                if text in ["1", "2"]:
+                if text == "y":
                     last_command_time = current_time
-                    return text  # return "1" or "2" for manual check
+                    return "PING"
 
     except Exception as e:
         print("Polling error:", e)
@@ -65,12 +64,22 @@ def check_telegram_commands():
 # 🏦 EXCHANGE
 # ==============================
 exchange = ccxt.okx()
-symbol = 'BTC/USDT'
+
+# List of symbols
+symbols = [
+    "ETC/USDT", "BTC/USDT", "XAU/USD", "NIFTY/50", "ETH/USDT", "ZEC/USDT", "ZEC/USDT",
+    "DASH/USDT", "US100", "XAG/USD", "EUR/USD", "BTC/USDT", "XRP/USDT", "BNB/USDT",
+    "XLM/USDT", "USOIL", "TON/USDT", "TRUMP/USDT", "SUI/USDT", "HBAR/USDT", "ETH/USDT",
+    "BNB/USDT", "SOL/USDT", "TRX/USDT", "DOGE/USDT", "SOL/USDT", "DAX40", "DOT/USDT",
+    "FIL/USDT", "TRX/USDT", "LTC/USDT", "ADA/USDT", "AVAX/USDT", "GBP/USD", "USD/JPY",
+    "XRP/USDT", "DOGE/USDT", "AUD/USD", "USD/CAD", "USD/CHF", "EUR/AUD", "EUR/CAD",
+    "AUD/NZD", "JP225", "XAU/USD", "NEAR/USDT", "SHIB/USDT", "UKOIL", "PEPE/USDT"
+]
 
 # ==============================
 # 📈 DATA FUNCTION
 # ==============================
-def get_data(timeframe):
+def get_data(symbol, timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
     df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
 
@@ -121,13 +130,10 @@ def check_signals(df1m, df15m):
 
     # Confidence
     confidence = 50
-
     if last1['rsi'] > 60 or last1['rsi'] < 40:
         confidence += 15
-
     if abs(last1['ma5'] - last1['ma10']) > 5:
         confidence += 15
-
     if trend_up or trend_down:
         confidence += 20
 
@@ -140,48 +146,33 @@ def check_signals(df1m, df15m):
 # ==============================
 def run_bot():
     print("Bot started...")
-    send_telegram("✅ Bot LIVE (1m entry + 15m trend)")
+    send_telegram("✅ Bot LIVE for multiple symbols")
 
-    last_signal = ""
+    last_signal_dict = {symbol: "" for symbol in symbols}
 
     while True:
         try:
-            # 1️⃣ Check manual commands
-            cmd = check_telegram_commands()  # returns "1", "2", or None
+            # Check if server ping
+            cmd = check_telegram_commands()
+            if cmd == "PING":
+                send_telegram("✅ Server OK, Bot Running")
+            
+            # Loop through all symbols
+            for symbol in symbols:
+                try:
+                    df1m = get_data(symbol, '1m')
+                    df15m = get_data(symbol, '15m')
 
-            # 2️⃣ Fetch latest data
-            df1m = get_data('1m')
-            df15m = get_data('15m')
+                    buy, sell, price, sl, tp, confidence, accuracy = check_signals(df1m, df15m)
 
-            # 3️⃣ Check auto strategy signals
-            buy, sell, price, sl, tp, confidence, accuracy = check_signals(df1m, df15m)
+                    ist = pytz.timezone('Asia/Kolkata')
+                    now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
 
-            # IST Time
-            ist = pytz.timezone('Asia/Kolkata')
-            now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
+                    last_signal = last_signal_dict[symbol]
 
-            # 4️⃣ AUTO SIGNALS
-            if buy and last_signal != "BUY":
-                msg = f"""
-💰 BUY SIGNAL
-
-💰 Price: {price}
-🎯 TP: {tp}
-🛑 SL: {sl}
-
-📊 Confidence: {confidence}%
-📈 Accuracy: {accuracy}%
-
-⏱ Time: {now}
-📝 Entry TF: 1m
-📊 Trend TF: 15m
-"""
-                send_telegram(msg)
-                last_signal = "BUY"
-
-            elif sell and last_signal != "SELL":
-                msg = f"""
-❌ SELL SIGNAL
+                    if buy and last_signal != "BUY":
+                        msg = f"""
+💰 BUY SIGNAL ({symbol})
 
 💰 Price: {price}
 🎯 TP: {tp}
@@ -194,30 +185,12 @@ def run_bot():
 📝 Entry TF: 1m
 📊 Trend TF: 15m
 """
-                send_telegram(msg)
-                last_signal = "SELL"
+                        send_telegram(msg)
+                        last_signal_dict[symbol] = "BUY"
 
-            # 5️⃣ MANUAL COMMANDS
-            if cmd in ["1", "2"]:
-                last1 = df1m.iloc[-1]
-                prev1 = df1m.iloc[-2]
-                last15 = df15m.iloc[-1]
-
-                reasons = []
-
-                if cmd == "1":  # Manual BUY
-                    if not buy:
-                        if not (prev1['ma5'] < prev1['ma10'] and last1['ma5'] > last1['ma10']):
-                            reasons.append("MA crossover condition not met")
-                        if not (last1['rsi'] > 50):
-                            reasons.append(f"RSI too low ({last1['rsi']:.2f})")
-                        if not (last15['close'] > last15['ma30']):
-                            reasons.append("15m trend not bullish")
-                    else:
-                        reasons.append("All conditions met ✅")
-
-                    msg = f"""
-💰 MANUAL BUY CHECK
+                    elif sell and last_signal != "SELL":
+                        msg = f"""
+❌ SELL SIGNAL ({symbol})
 
 💰 Price: {price}
 🎯 TP: {tp}
@@ -226,47 +199,20 @@ def run_bot():
 📊 Confidence: {confidence}%
 📈 Accuracy: {accuracy}%
 
-⚡ Conditions: {' | '.join(reasons)}
-
 ⏱ Time: {now}
 📝 Entry TF: 1m
 📊 Trend TF: 15m
 """
-                    send_telegram(msg)
+                        send_telegram(msg)
+                        last_signal_dict[symbol] = "SELL"
 
-                elif cmd == "2":  # Manual SELL
-                    if not sell:
-                        if not (prev1['ma5'] > prev1['ma10'] and last1['ma5'] < last1['ma10']):
-                            reasons.append("MA crossover condition not met")
-                        if not (last1['rsi'] < 50):
-                            reasons.append(f"RSI too high ({last1['rsi']:.2f})")
-                        if not (last15['close'] < last15['ma30']):
-                            reasons.append("15m trend not bearish")
-                    else:
-                        reasons.append("All conditions met ✅")
-
-                    msg = f"""
-❌ MANUAL SELL CHECK
-
-💰 Price: {price}
-🎯 TP: {tp}
-🛑 SL: {sl}
-
-📊 Confidence: {confidence}%
-📈 Accuracy: {accuracy}%
-
-⚡ Conditions: {' | '.join(reasons)}
-
-⏱ Time: {now}
-📝 Entry TF: 1m
-📊 Trend TF: 15m
-"""
-                    send_telegram(msg)
+                except Exception as e_sym:
+                    print(f"Error for {symbol}: {e_sym}")
 
             time.sleep(30)
 
         except Exception as e:
-            print("Error:", e)
+            print("Error in bot loop:", e)
             time.sleep(10)
 
 # ==============================
@@ -277,7 +223,7 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     print("Ping received")
-    return "🚀 BTC Bot Running!"
+    return "🚀 Multi-Symbol BTC Bot Running!"
 
 # ==============================
 # ▴ START
