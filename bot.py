@@ -7,55 +7,76 @@ from flask import Flask
 import threading
 from datetime import datetime
 import pytz
-import os
 
 # ==============================
-# 📌 TELEGRAM SETTINGS
+# 🔐 TELEGRAM SETTINGS
 # ==============================
-TOKEN = os.getenv("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")
-CHAT_ID = os.getenv("6094849602")
+TOKEN = "8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c"
+CHAT_ID = "6094849602"
 
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-    except Exception as e:
-        print("Telegram Error:", e)
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg}
+        )
+    except:
+        pass
 
 # ==============================
-# 🏦 EXCHANGE
+# 🏦 EXCHANGE (RATE LIMIT SAFE)
 # ==============================
-exchange = ccxt.okx()
-
-# ==============================
-# ⚙️ SETTINGS
-# ==============================
-sleep_time = int(os.getenv("BOT_SLEEP", 30))
-no_signal_interval = int(os.getenv("NO_SIGNAL_INTERVAL", 900))
+exchange = ccxt.okx({
+    "enableRateLimit": True
+})
 
 # ==============================
 # 🔹 SYMBOLS
 # ==============================
 symbols = [
-    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "DOT/USDT", "TRX/USDT",
-    "LTC/USDT", "FIL/USDT", "NEAR/USDT", "SHIB/USDT", "PEPE/USDT",
-    "ETC/USDT", "ZEC/USDT", "DASH/USDT", "XLM/USDT", "HBAR/USDT",
-    "TON/USDT", "SUI/USDT"
+    "BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
+    "DOGE/USDT","ADA/USDT","AVAX/USDT","DOT/USDT","TRX/USDT"
 ]
 
 # ==============================
-# 📈 DATA FUNCTION
+# ⚙️ GLOBAL CONTROL
+# ==============================
+last_signal_time = {s: 0 for s in symbols}
+last_signal_type = {s: "" for s in symbols}
+cooldown = 300   # 5 min per symbol
+api_delay = 1    # prevent rate limit
+
+# ==============================
+# 📈 SAFE DATA FETCH
+# ==============================
+def safe_fetch(symbol, timeframe):
+    for _ in range(3):  # retry 3 times
+        try:
+            data = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+            return data
+        except Exception as e:
+            print(f"Retry {symbol}:", e)
+            time.sleep(2)
+    return None
+
+# ==============================
+# 📊 INDICATORS
 # ==============================
 def get_data(symbol, timeframe):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+    ohlcv = safe_fetch(symbol, timeframe)
+    if ohlcv is None:
+        return None
+
     df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
 
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma10'] = df['close'].rolling(10).mean()
     df['ma30'] = df['close'].rolling(30).mean()
 
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    df['ema5'] = df['close'].ewm(span=5).mean()
+    df['ema10'] = df['close'].ewm(span=10).mean()
+
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], 14).rsi()
 
     macd = ta.trend.MACD(df['close'])
     df['macd'] = macd.macd()
@@ -76,109 +97,105 @@ def get_data(symbol, timeframe):
     return df
 
 # ==============================
-# 🧐 STRATEGY
+# 🧠 STRATEGY
 # ==============================
 def check_signals(df1m, df15m):
-    last1 = df1m.iloc[-1]
-    prev1 = df1m.iloc[-2]
-    last15 = df15m.iloc[-1]
+    last = df1m.iloc[-1]
+    prev = df1m.iloc[-2]
+    trend = df15m.iloc[-1]
 
     buy = (
-        prev1['ma5'] < prev1['ma10'] and
-        last1['ma5'] > last1['ma10'] and
-        last1['rsi'] > 50 and
-        last1['macd'] > last1['macd_signal'] and
-        last1['stoch_k'] > last1['stoch_d'] and
-        last15['close'] > last15['ma30']
+        prev['ma5'] < prev['ma10'] and
+        last['ma5'] > last['ma10'] and
+        last['rsi'] > 50 and
+        last['macd'] > last['macd_signal'] and
+        last['ema5'] > last['ema10'] and
+        last['stoch_k'] > last['stoch_d'] and
+        last['close'] > last['bb_lower'] and
+        trend['close'] > trend['ma30']
     )
 
     sell = (
-        prev1['ma5'] > prev1['ma10'] and
-        last1['ma5'] < last1['ma10'] and
-        last1['rsi'] < 50 and
-        last1['macd'] < last1['macd_signal'] and
-        last1['stoch_k'] < last1['stoch_d'] and
-        last15['close'] < last15['ma30']
+        prev['ma5'] > prev['ma10'] and
+        last['ma5'] < last['ma10'] and
+        last['rsi'] < 50 and
+        last['macd'] < last['macd_signal'] and
+        last['ema5'] < last['ema10'] and
+        last['stoch_k'] < last['stoch_d'] and
+        last['close'] < last['bb_upper'] and
+        trend['close'] < trend['ma30']
     )
 
-    price = last1['close']
-    atr = last1['atr']
+    price = last['close']
+    atr = last['atr']
 
     sl = price - atr if buy else price + atr
     tp = price + 2*atr if buy else price - 2*atr
 
-    confidence = 50
-    if last1['rsi'] > 60 or last1['rsi'] < 40:
-        confidence += 15
-    if abs(last1['ma5'] - last1['ma10']) > 5:
-        confidence += 10
-
-    accuracy = min(confidence, 100)
-
-    return buy, sell, price, sl, tp, confidence, accuracy
+    return buy, sell, price, sl, tp
 
 # ==============================
-# 🤖 BOT LOOP
+# 🤖 PROCESS SYMBOL
 # ==============================
-def run_bot():
-    print("Bot started...")
-    send_telegram("✅ Bot LIVE")
-
-    last_signal = {s: "" for s in symbols}
-    last_no_signal = {s: 0 for s in symbols}
-    last_heartbeat = 0
+def process_symbol(symbol):
+    global last_signal_time, last_signal_type
 
     while True:
         try:
-            current_time = time.time()
+            df1 = get_data(symbol, '1m')
+            df15 = get_data(symbol, '15m')
 
-            # ✅ HEARTBEAT EVERY 15 MIN
-            if current_time - last_heartbeat > 900:
-                ist = pytz.timezone('Asia/Kolkata')
-                now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
+            if df1 is None or df15 is None:
+                continue
 
-                send_telegram(f"""
-🟢 BOT STATUS: RUNNING
+            buy, sell, price, sl, tp = check_signals(df1, df15)
 
-✅ Server OK
-✅ Loop Active
-📊 Symbols: {len(symbols)}
+            now = time.time()
 
-⏱ {now}
-""")
-                last_heartbeat = current_time
+            # ⛔ COOLDOWN CONTROL
+            if now - last_signal_time[symbol] < cooldown:
+                continue
 
-            for symbol in symbols:
-                try:
-                    df1 = get_data(symbol, '1m')
-                    df15 = get_data(symbol, '15m')
+            # ⛔ DUPLICATE FILTER
+            if buy and last_signal_type[symbol] != "BUY":
+                send_telegram(f"🟢 BUY {symbol}\nPrice:{price}\nTP:{tp}\nSL:{sl}")
+                last_signal_time[symbol] = now
+                last_signal_type[symbol] = "BUY"
 
-                    buy, sell, price, sl, tp, conf, acc = check_signals(df1, df15)
+            elif sell and last_signal_type[symbol] != "SELL":
+                send_telegram(f"🔴 SELL {symbol}\nPrice:{price}\nTP:{tp}\nSL:{sl}")
+                last_signal_time[symbol] = now
+                last_signal_type[symbol] = "SELL"
 
-                    ist = pytz.timezone('Asia/Kolkata')
-                    now = datetime.now(ist).strftime("%I:%M:%S %p")
-
-                    if buy and last_signal[symbol] != "BUY":
-                        send_telegram(f"🟢 BUY {symbol}\nPrice: {price}\nTP: {tp}\nSL: {sl}")
-                        last_signal[symbol] = "BUY"
-
-                    elif sell and last_signal[symbol] != "SELL":
-                        send_telegram(f"🔴 SELL {symbol}\nPrice: {price}\nTP: {tp}\nSL: {sl}")
-                        last_signal[symbol] = "SELL"
-
-                    elif not buy and not sell:
-                        if current_time - last_no_signal[symbol] > no_signal_interval:
-                            send_telegram(f"⚪ NO SIGNAL {symbol}")
-                            last_no_signal[symbol] = current_time
-
-                except Exception as e:
-                    print(symbol, e)
-
-            time.sleep(sleep_time)
+            time.sleep(api_delay)
 
         except Exception as e:
-            print("Main Error:", e)
-            time.sleep(10)
+            print(symbol, e)
+            time.sleep(5)
+
+# ==============================
+# ❤️ HEARTBEAT (15 MIN)
+# ==============================
+def heartbeat():
+    while True:
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist).strftime("%I:%M %p")
+        send_telegram(f"💓 Bot Alive - {now}")
+        time.sleep(900)  # 15 min
+
+# ==============================
+# 🚀 MAIN BOT
+# ==============================
+def run_bot():
+    send_telegram("🚀 PRO BOT LIVE")
+
+    for sym in symbols:
+        threading.Thread(target=process_symbol, args=(sym,), daemon=True).start()
+
+    threading.Thread(target=heartbeat, daemon=True).start()
+
+    while True:
+        time.sleep(10)
 
 # ==============================
 # 🌐 FLASK
@@ -187,11 +204,11 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot Running"
+    return "🚀 Production Bot Running"
 
 # ==============================
 # ▶ START
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=10000)
