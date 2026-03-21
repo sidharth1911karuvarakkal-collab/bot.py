@@ -8,26 +8,34 @@ from textblob import TextBlob
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CAPITAL = 100        # Total capital $
-RISK_PER_TRADE = 0.01   # 1% risk
+print("🔑 TOKEN:", TOKEN)
+print("💬 CHAT_ID:", CHAT_ID)
+
+CAPITAL = 100
+RISK_PER_TRADE = 0.01
 
 # ================= TELEGRAM =================
 def send(msg):
+    print("📤 Sending message...")
     try:
-        requests.post(
+        res = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg}
         )
-    except:
-        pass
+        print("📩 Telegram response:", res.text)
+    except Exception as e:
+        print("❌ Telegram Error:", e)
 
 # ================= EXCHANGE =================
-exchange = ccxt.okx()
+exchange = ccxt.okx({
+    'enableRateLimit': True
+})
 symbol = "BTC/USDT"
 
 # ================= DATA =================
 def get_df(tf):
-    data = exchange.fetch_ohlcv(symbol, tf, limit=100)
+    print(f"📊 Fetching data: {tf}")
+    data = exchange.fetch_ohlcv(symbol, tf, limit=50)
     df = pd.DataFrame(data, columns=['t','o','h','l','c','v'])
 
     df['ema20'] = df['c'].ewm(span=20).mean()
@@ -37,30 +45,35 @@ def get_df(tf):
 
     return df
 
+# ================= SAFE FETCH =================
+def safe_fetch(tf):
+    try:
+        return get_df(tf)
+    except Exception as e:
+        print("⚠️ Retry after error:", e)
+        time.sleep(10)
+        return get_df(tf)
+
 # ================= SENTIMENT =================
 def sentiment():
     try:
         news = requests.get("https://cryptocurrency.cv/api/news").json()['data'][:10]
         score = sum(TextBlob(n['title']).sentiment.polarity for n in news)/len(news)
-    except:
+    except Exception as e:
+        print("⚠️ Sentiment error:", e)
         score = 0
 
-    if score > 0.05:
-        return "Bullish"
-    elif score < -0.05:
-        return "Bearish"
+    if score > 0.05: return "Bullish"
+    elif score < -0.05: return "Bearish"
     return "Neutral"
 
 # ================= POSITION SIZE =================
 def position_size(price, sl):
     risk_amount = CAPITAL * RISK_PER_TRADE
     risk_per_unit = abs(price - sl)
-
     if risk_per_unit == 0:
         return 0
-
-    qty = risk_amount / risk_per_unit
-    return round(qty, 6)
+    return round(risk_amount / risk_per_unit, 6)
 
 # ================= SIGNAL =================
 def check(df1, df15):
@@ -70,16 +83,16 @@ def check(df1, df15):
     trend_up = df15['c'].iloc[-1] > df15['ema50'].iloc[-1]
     trend_down = df15['c'].iloc[-1] < df15['ema50'].iloc[-1]
 
-    breakout_up = last['c'] > df1['h'].rolling(20).max().iloc[-2]
-    breakout_down = last['c'] < df1['l'].rolling(20).min().iloc[-2]
+    breakout_up = last['c'] > df1['h'].rolling(10).max().iloc[-2]
+    breakout_down = last['c'] < df1['l'].rolling(10).min().iloc[-2]
 
     retest_up = prev['c'] < prev['ema20'] and last['c'] > last['ema20']
     retest_down = prev['c'] > prev['ema20'] and last['c'] < last['ema20']
 
-    vol_ok = last['v'] > df1['v'].rolling(20).mean().iloc[-1]
+    vol_ok = last['v'] > df1['v'].rolling(10).mean().iloc[-1]
 
     atr_percent = (last['atr']/last['c'])*100
-    sideways = atr_percent < 0.2
+    sideways = atr_percent < 0.15
 
     buy = breakout_up and retest_up and trend_up and vol_ok and not sideways
     sell = breakout_down and retest_down and trend_down and vol_ok and not sideways
@@ -92,7 +105,7 @@ def check(df1, df15):
 
     return buy, sell, price, sl, tp, sideways
 
-# ================= TRADE LOG =================
+# ================= LOG =================
 def log_trade(data):
     with open("trades.csv", "a", newline="") as f:
         writer = csv.writer(f)
@@ -100,93 +113,71 @@ def log_trade(data):
 
 # ================= BOT =================
 def run():
-    send("🚀 PROFESSIONAL BOT LIVE")
+    print("✅ RUN FUNCTION STARTED")
+    send("🚀 BOT LIVE")
 
     last_signal = "NONE"
-    trades = 0
-    wins = 0
-    losses = 0
-    last_heartbeat = 0
 
     while True:
         try:
-            df1 = get_df('1m')
-            df15 = get_df('15m')
+            print("🔄 Loop running...")
+
+            df1 = safe_fetch('1m')
+            df15 = safe_fetch('15m')
 
             buy, sell, price, sl, tp, sideways = check(df1, df15)
+            print(f"📈 Buy: {buy}, Sell: {sell}, Sideways: {sideways}")
+
             sent = sentiment()
 
             now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-            current_time = time.time()
 
-            # POSITION SIZE
             qty = position_size(price, sl)
 
-            # SIGNAL
             if buy and last_signal != "BUY":
-                trades += 1
-                send(f"""
-🟢 BUY
-
-Price: {price}
-SL: {sl}
-TP: {tp}
-Qty: {qty}
-
-Sentiment: {sent}
-Time: {now}
-""")
-                log_trade([now, "BUY", price, sl, tp, qty])
+                send(f"🟢 BUY\nPrice:{price}\nSL:{sl}\nTP:{tp}\nQty:{qty}\nSent:{sent}\nTime:{now}")
+                log_trade([now,"BUY",price,sl,tp,qty])
                 last_signal = "BUY"
 
             elif sell and last_signal != "SELL":
-                trades += 1
-                send(f"""
-🔴 SELL
-
-Price: {price}
-SL: {sl}
-TP: {tp}
-Qty: {qty}
-
-Sentiment: {sent}
-Time: {now}
-""")
-                log_trade([now, "SELL", price, sl, tp, qty])
+                send(f"🔴 SELL\nPrice:{price}\nSL:{sl}\nTP:{tp}\nQty:{qty}\nSent:{sent}\nTime:{now}")
+                log_trade([now,"SELL",price,sl,tp,qty])
                 last_signal = "SELL"
 
-            # HEARTBEAT + PERFORMANCE
-            if current_time - last_heartbeat > 3600:
-                win_rate = (wins/trades*100) if trades > 0 else 0
-
-                send(f"""
-💓 BOT STATUS
-
-Trades: {trades}
-Wins: {wins}
-Losses: {losses}
-Win Rate: {round(win_rate,2)}%
-
-Last Signal: {last_signal}
-Sentiment: {sent}
-
-Time: {now}
-""")
-                last_heartbeat = current_time
-
-            time.sleep(30)
+            time.sleep(60)
 
         except Exception as e:
-            send(f"❌ Error: {e}")
-            time.sleep(10)
+            print("❌ ERROR OCCURRED:", e)
+            send(f"❌ ERROR: {e}")
+            time.sleep(15)
 
-# ================= SERVER =================
+# ================= HEARTBEAT =================
+def heartbeat():
+    while True:
+        try:
+            now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+            send(f"💓 BOT ALIVE\nTime: {now}")
+            print("💓 Heartbeat sent")
+        except Exception as e:
+            print("Heartbeat error:", e)
+
+        time.sleep(3600)
+
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Professional Bot Running"
+    return "Bot Running"
 
+# ================= START =================
 if __name__ == "__main__":
-    threading.Thread(target=run, daemon=True).start()
+    print("🚀 STARTING BOT")
+
+    t1 = threading.Thread(target=run)
+    t1.start()
+
+    t2 = threading.Thread(target=heartbeat)
+    t2.start()
+
     app.run(host="0.0.0.0", port=10000)
