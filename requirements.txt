@@ -1,6 +1,7 @@
 ccxt==3.0.69
-pandas==2.1.1
+pandas==1.5.3
 ta==0.10.2
 flask==2.3.6
 requests==2.31.0
 pytz==2025.7
+numpy==1.25.2
