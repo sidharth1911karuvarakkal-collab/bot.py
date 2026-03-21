@@ -5,8 +5,8 @@ import pytz
 from textblob import TextBlob
 
 # ================= CONFIG =================
-TOKEN = os.getenv("8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c")
-CHAT_ID = os.getenv("6094849602")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CAPITAL = 100        # Total capital $
 RISK_PER_TRADE = 0.01   # 1% risk
