@@ -7,325 +7,207 @@ from flask import Flask
 import threading
 from datetime import datetime
 import pytz
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-import joblib
-import os
 
 # ==============================
-# 🔐 TELEGRAM SETTINGS
+# 🔑 TELEGRAM SETTINGS
 # ==============================
 TOKEN = "8714289158:AAHQinJdvslG9f8qwfdX748WIXDgiXuBd9c"
 CHAT_ID = "6094849602"
 
 def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg}
-        )
-    except:
-        pass
+        res = requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        print("Telegram:", res.text)
+    except Exception as e:
+        print("Telegram Error:", e)
 
 # ==============================
-# 🏦 EXCHANGE
+# 📊 EXCHANGE
 # ==============================
-exchange = ccxt.okx({"enableRateLimit": True})
-symbol = "BTC/USDT"
+exchange = ccxt.okx()
+symbol = 'BTC/USDT'
 
 # ==============================
-# ⚙️ CONTROL
+# 📈 DATA FUNCTION
 # ==============================
-last_signal_time = 0
-last_signal_type = ""
-cooldown = 300  # 5 min
-
-# ==============================
-# 🤖 AI MODELS
-# ==============================
-rf_model = RandomForestClassifier(n_estimators=100)
-gb_model = GradientBoostingClassifier()
-
-MODEL_FILE = "model.pkl"
-model_trained = False
-X_data = []
-y_data = []
-
-# ==============================
-# 🧠 RL MEMORY
-# ==============================
-trade_memory = []
-
-# ==============================
-# 📦 MODEL SAVE/LOAD
-# ==============================
-def save_model():
-    joblib.dump((rf_model, gb_model), MODEL_FILE)
-
-def load_model():
-    global model_trained, rf_model, gb_model
-    if os.path.exists(MODEL_FILE):
-        rf_model, gb_model = joblib.load(MODEL_FILE)
-        model_trained = True
-
-# ==============================
-# 📈 SAFE FETCH
-# ==============================
-def safe_fetch(tf):
-    for _ in range(3):
-        try:
-            return exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
-        except:
-            time.sleep(2)
-    return None
-
-# ==============================
-# 📊 INDICATORS
-# ==============================
-def get_data(tf):
-    ohlcv = safe_fetch(tf)
-    if ohlcv is None:
-        return None
-
+def get_data(timeframe):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
     df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
 
+    # Main Indicators
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma10'] = df['close'].rolling(10).mean()
     df['ma30'] = df['close'].rolling(30).mean()
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
 
-    df['ema5'] = df['close'].ewm(span=5).mean()
-    df['ema10'] = df['close'].ewm(span=10).mean()
-
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], 14).rsi()
-
-    macd = ta.trend.MACD(df['close'])
+    # Sub Indicators
+    # MACD
+    macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
     df['macd'] = macd.macd()
     df['macd_signal'] = macd.macd_signal()
 
-    bb = ta.volatility.BollingerBands(df['close'])
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
+    # Bollinger Bands
+    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+    df['bb_high'] = bb.bollinger_hband()
+    df['bb_low'] = bb.bollinger_lband()
 
-    df['atr'] = ta.volatility.AverageTrueRange(
-        df['high'], df['low'], df['close']).average_true_range()
-
-    stoch = ta.momentum.StochasticOscillator(
-        df['high'], df['low'], df['close'])
-    df['stoch_k'] = stoch.stoch()
-    df['stoch_d'] = stoch.stoch_signal()
+    # EMA (20 period)
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
 
     return df
 
 # ==============================
-# 🧠 FEATURES
-# ==============================
-def extract_features(df):
-    last = df.iloc[-1]
-    return [
-        last['ma5'] - last['ma10'],
-        last['ema5'] - last['ema10'],
-        last['rsi'],
-        last['macd'] - last['macd_signal'],
-        last['stoch_k'] - last['stoch_d'],
-        last['close'] - last['bb_lower'],
-        last['bb_upper'] - last['close'],
-        last['atr'],
-        last['volume'],
-        last['close'] - df['close'].mean()
-    ]
-
-# ==============================
-# 📊 MARKET REGIME
-# ==============================
-def market_regime(df15):
-    trend = df15.iloc[-1]
-    strength = abs(trend['close'] - trend['ma30'])
-    return "TREND" if strength > 80 else "SIDEWAYS"
-
-# ==============================
-# 🤖 ENSEMBLE PREDICTION
-# ==============================
-def ensemble_predict(features):
-    rf_prob = rf_model.predict_proba([features])[0]
-    gb_prob = gb_model.predict_proba([features])[0]
-    return (max(rf_prob) + max(gb_prob)) / 2 * 100
-
-# ==============================
-# 🧠 STRATEGY SCORING
+# 🤖 STRATEGY
 # ==============================
 def check_signals(df1m, df15m):
-    last = df1m.iloc[-1]
-    prev = df1m.iloc[-2]
-    trend = df15m.iloc[-1]
+    last1 = df1m.iloc[-1]
+    prev1 = df1m.iloc[-2]
+    last15 = df15m.iloc[-1]
 
-    buy_score = 0
-    sell_score = 0
-    reasons = []
+    used_indicators = []
 
-    if prev['ma5'] < prev['ma10'] and last['ma5'] > last['ma10']:
-        buy_score += 1; reasons.append("MA Bullish")
-    elif prev['ma5'] > prev['ma10'] and last['ma5'] < last['ma10']:
-        sell_score += 1; reasons.append("MA Bearish")
+    # =================
+    # MAIN INDICATORS
+    # =================
+    buy_main = prev1['ma5'] < prev1['ma10'] and last1['ma5'] > last1['ma10'] and last1['rsi'] > 50
+    sell_main = prev1['ma5'] > prev1['ma10'] and last1['ma5'] < last1['ma10'] and last1['rsi'] < 50
 
-    if last['ema5'] > last['ema10']:
-        buy_score += 1; reasons.append("EMA Bullish")
-    else:
-        sell_score += 1; reasons.append("EMA Bearish")
+    if buy_main:
+        used_indicators += ["MA", "RSI"]
+    if sell_main:
+        used_indicators += ["MA", "RSI"]
 
-    if last['rsi'] > 55:
-        buy_score += 1; reasons.append("RSI Strong")
-    elif last['rsi'] < 45:
-        sell_score += 1; reasons.append("RSI Weak")
+    # =================
+    # TREND CONFIRMATION (15m)
+    # =================
+    trend_up = last15['close'] > last15['ma30']
+    trend_down = last15['close'] < last15['ma30']
 
-    if last['macd'] > last['macd_signal']:
-        buy_score += 1; reasons.append("MACD Bullish")
-    else:
-        sell_score += 1; reasons.append("MACD Bearish")
+    # =================
+    # SUB INDICATORS
+    # =================
+    sub_buy = False
+    sub_sell = False
 
-    if last['stoch_k'] > last['stoch_d']:
-        buy_score += 1; reasons.append("Stoch Bullish")
-    else:
-        sell_score += 1; reasons.append("Stoch Bearish")
+    # MACD
+    if last1['macd'] > last1['macd_signal']:
+        sub_buy = True
+        used_indicators.append("MACD")
+    elif last1['macd'] < last1['macd_signal']:
+        sub_sell = True
+        used_indicators.append("MACD")
 
-    if last['close'] < last['bb_lower']:
-        buy_score += 1; reasons.append("BB Oversold")
-    elif last['close'] > last['bb_upper']:
-        sell_score += 1; reasons.append("BB Overbought")
+    # Bollinger
+    if last1['close'] < last1['bb_low']:
+        sub_buy = True
+        used_indicators.append("Bollinger")
+    elif last1['close'] > last1['bb_high']:
+        sub_sell = True
+        used_indicators.append("Bollinger")
 
-    trend_up = trend['close'] > trend['ma30']
-    trend_down = trend['close'] < trend['ma30']
+    # EMA
+    if last1['close'] > last1['ema20']:
+        sub_buy = True
+        used_indicators.append("EMA")
+    elif last1['close'] < last1['ema20']:
+        sub_sell = True
+        used_indicators.append("EMA")
 
-    return buy_score, sell_score, reasons, trend_up, trend_down
+    # =================
+    # FINAL SIGNAL
+    # =================
+    buy_signal = buy_main and (sub_buy or trend_up)
+    sell_signal = sell_main and (sub_sell or trend_down)
+
+    price = last1['close']
+    sl = price * 0.995 if buy_signal else price * 1.005
+    tp = price * 1.01 if buy_signal else price * 0.99
+
+    # Confidence (same logic)
+    confidence = 50
+    if last1['rsi'] > 60 or last1['rsi'] < 40:
+        confidence += 15
+    if abs(last1['ma5'] - last1['ma10']) > 5:
+        confidence += 15
+    if trend_up or trend_down:
+        confidence += 20
+    accuracy = min(confidence, 90)
+
+    return buy_signal, sell_signal, price, sl, tp, confidence, accuracy, list(set(used_indicators))
 
 # ==============================
-# 🧠 RL ADAPTIVE MODE
-# ==============================
-def adjust_strategy():
-    wins = [t for t in trade_memory if t.get("reward", 0) > 0]
-    losses = [t for t in trade_memory if t.get("reward", 0) < 0]
-
-    return "CONSERVATIVE" if len(losses) > len(wins) else "AGGRESSIVE"
-
-# ==============================
-# ❤️ HEARTBEAT (1 HOUR)
-# ==============================
-def heartbeat():
-    while True:
-        try:
-            now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%I:%M %p")
-            send_telegram(f"💓 BTC Bot Alive - {now}")
-        except:
-            pass
-        time.sleep(3600)  # 1 hour
-
-# ==============================
-# 🤖 BOT LOOP
+# 🤖 BOT LOOP WITH HEARTBEAT
 # ==============================
 def run_bot():
-    global last_signal_time, last_signal_type, model_trained
+    print("Bot started...")
+    send_telegram("✅ Bot LIVE (1m entry + 15m trend)")
 
-    load_model()
-    send_telegram("🚀 INSTITUTIONAL BTC BOT LIVE")
+    last_signal = ""
+    last_heartbeat = 0
+    heartbeat_interval = 3600  # 1 hour
 
     while True:
         try:
-            df1 = get_data('1m')
-            df15 = get_data('15m')
+            df1m = get_data('1m')
+            df15m = get_data('15m')
 
-            if df1 is None or df15 is None:
-                continue
+            buy, sell, price, sl, tp, confidence, accuracy, used_indicators = check_signals(df1m, df15m)
 
-            features = extract_features(df1)
+            # IST TIME
+            ist = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(ist).strftime("%Y-%m-%d %I:%M:%S %p")
 
-            if len(df1) > 5:
-                label = 1 if df1.iloc[-1]['close'] > df1.iloc[-5]['close'] else 0
-                X_data.append(features)
-                y_data.append(label)
+            # 🔥 AUTO SIGNALS
+            if buy and last_signal != "BUY":
+                msg = f"""
+🟢 BUY SIGNAL
 
-            if len(X_data) > 150 and not model_trained:
-                rf_model.fit(X_data, y_data)
-                gb_model.fit(X_data, y_data)
-                save_model()
-                model_trained = True
-                send_telegram("🤖 AI TRAINED")
+💰 Price: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
 
-            ai_prob = ensemble_predict(features) if model_trained else 0
+📊 Confidence: {confidence}%
+📈 Accuracy: {accuracy}%
 
-            buy_score, sell_score, reasons, trend_up, trend_down = check_signals(df1, df15)
+📌 Indicators Used: {', '.join(used_indicators)}
+⏱ Time: {now}
+📉 Entry TF: 1m
+📊 Trend TF: 15m
+"""
+                send_telegram(msg)
+                last_signal = "BUY"
 
-            regime = market_regime(df15)
-            mode = adjust_strategy()
+            elif sell and last_signal != "SELL":
+                msg = f"""
+🔴 SELL SIGNAL
 
-            required_score = 5 if mode == "CONSERVATIVE" else 4
-            required_ai = 75 if mode == "CONSERVATIVE" else 65
+💰 Price: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
 
-            if regime == "SIDEWAYS":
-                continue
+📊 Confidence: {confidence}%
+📈 Accuracy: {accuracy}%
 
-            if model_trained and ai_prob < required_ai:
-                continue
+📌 Indicators Used: {', '.join(used_indicators)}
+⏱ Time: {now}
+📉 Entry TF: 1m
+📊 Trend TF: 15m
+"""
+                send_telegram(msg)
+                last_signal = "SELL"
 
-            now = time.time()
-            if now - last_signal_time < cooldown:
-                continue
+            # 💓 HEARTBEAT
+            current_time = time.time()
+            if current_time - last_heartbeat > heartbeat_interval:
+                send_telegram(f"💓 Heartbeat: Bot alive at {now}")
+                last_heartbeat = current_time
 
-            price = df1.iloc[-1]['close']
-            atr = df1.iloc[-1]['atr']
-
-            sl = price - (1.5 * atr)
-            tp = price + (2.5 * atr)
-
-            ist = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-
-            if buy_score >= required_score and trend_up:
-                send_telegram(f"""🟢 BUY BTC/USDT
-
-Price: {price}
-TP: {tp}
-SL: {sl}
-
-AI: {ai_prob:.2f}%
-Mode: {mode}
-Market: {regime}
-
-Buy Score: {buy_score}
-Sell Score: {sell_score}
-
-Reason:
-{', '.join(reasons)}
-
-Time: {ist}
-""")
-                last_signal_time = now
-                last_signal_type = "BUY"
-
-            elif sell_score >= required_score and trend_down:
-                send_telegram(f"""🔴 SELL BTC/USDT
-
-Price: {price}
-TP: {tp}
-SL: {sl}
-
-AI: {ai_prob:.2f}%
-Mode: {mode}
-Market: {regime}
-
-Buy Score: {buy_score}
-Sell Score: {sell_score}
-
-Reason:
-{', '.join(reasons)}
-
-Time: {ist}
-""")
-                last_signal_time = now
-                last_signal_type = "SELL"
-
-            time.sleep(10)
+            time.sleep(30)
 
         except Exception as e:
             print("Error:", e)
-            time.sleep(5)
+            time.sleep(10)
 
 # ==============================
 # 🌐 FLASK
@@ -334,12 +216,12 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Institutional Bot Running"
+    print("Ping received")
+    return "🚀 BTC Bot Running!"
 
 # ==============================
-# ▶ START
+# ▶️ START
 # ==============================
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
-    threading.Thread(target=heartbeat).start()  # ✅ added
     app.run(host="0.0.0.0", port=10000)
