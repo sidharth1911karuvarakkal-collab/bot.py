@@ -76,24 +76,35 @@ def position_size(price, sl):
     return round(risk_amount / risk_per_unit, 6)
 
 # ================= SIGNAL =================
-def check(df1, df15):
+def check(df1, df15, df5=None):
     last = df1.iloc[-1]
     prev = df1.iloc[-2]
 
-    trend_up = df15['c'].iloc[-1] > df15['ema50'].iloc[-1]
-    trend_down = df15['c'].iloc[-1] < df15['ema50'].iloc[-1]
+    # Trend detection (15m EMA50)
+    trend_up = df15['c'].iloc[-1] > df15['ema50'].iloc[-1]*0.995
+    trend_down = df15['c'].iloc[-1] < df15['ema50'].iloc[-1]*1.005
 
-    breakout_up = last['c'] > df1['h'].rolling(10).max().iloc[-2]
-    breakout_down = last['c'] < df1['l'].rolling(10).min().iloc[-2]
+    # Optional 5-minute trend filter for higher frequency
+    if df5 is not None:
+        trend_up = trend_up or (df5['c'].iloc[-1] > df5['ema50'].iloc[-1]*0.995)
+        trend_down = trend_down or (df5['c'].iloc[-1] < df5['ema50'].iloc[-1]*1.005)
 
+    # Breakout detection (smaller window)
+    breakout_up = last['c'] > df1['h'].rolling(5).max().iloc[-2]
+    breakout_down = last['c'] < df1['l'].rolling(5).min().iloc[-2]
+
+    # Retest EMA20
     retest_up = prev['c'] < prev['ema20'] and last['c'] > last['ema20']
     retest_down = prev['c'] > prev['ema20'] and last['c'] < last['ema20']
 
-    vol_ok = last['v'] > df1['v'].rolling(10).mean().iloc[-1]
+    # Volume filter (more flexible)
+    vol_ok = last['v'] > 0.8 * df1['v'].rolling(5).mean().iloc[-1]
 
+    # Sideways filter (less strict)
     atr_percent = (last['atr']/last['c'])*100
-    sideways = atr_percent < 0.15
+    sideways = atr_percent < 0.1
 
+    # Signal determination
     buy = breakout_up and retest_up and trend_up and vol_ok and not sideways
     sell = breakout_down and retest_down and trend_down and vol_ok and not sideways
 
@@ -124,8 +135,9 @@ def run():
 
             df1 = safe_fetch('1m')
             df15 = safe_fetch('15m')
+            df5 = safe_fetch('5m')  # additional trend filter
 
-            buy, sell, price, sl, tp, sideways = check(df1, df15)
+            buy, sell, price, sl, tp, sideways = check(df1, df15, df5)
             print(f"📈 Buy: {buy}, Sell: {sell}, Sideways: {sideways}")
 
             sent = sentiment()
